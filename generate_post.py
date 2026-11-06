@@ -1,168 +1,197 @@
-import os
+import html
 import json
+import os
 import random
-from datetime import datetime
+import re
+from datetime import datetime, timezone
+from pathlib import Path
+
+import nh3
 from google import genai
+from google.genai import types
+
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+SITE_URL = "https://justcalculators.app"
+POSTS_DIR = Path("posts")
+ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
+
+
+def slugify(text):
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:60].strip("-")
+    return slug or "post"
+
+
+def recent_calculators(n=10):
+    names = set()
+    for f in sorted(POSTS_DIR.glob("*.html"), reverse=True)[:n]:
+        m = re.search(r'<meta name="calculator" content="([^"]*)"',
+                      f.read_text(encoding="utf-8"))
+        if m:
+            names.add(html.unescape(m.group(1)))
+    return names
+
+
+def generate_post(client, calc):
+    prompt = f"""
+You are a content writer for JustCalculators.app. Write a helpful, SEO-friendly
+blog post about the practical, real-world value of this calculator:
+
+Tool: {calc['name']}
+Description: {calc['description']}
+
+Rules:
+- Return a JSON object with exactly two keys: "title" and "content".
+- "title": a clear, specific headline (no clickbait).
+- "content": HTML using only <h2>, <p>, <ul>, <li>, <strong>. Do not include
+  an <h1>, links, or a call-to-action box.
+- 3-4 substantial sections with practical examples.
+- Do NOT state specific statistics, interest rates, tax figures, or legal
+  claims. Use illustrative round numbers and label them as examples.
+"""
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"),
+            )
+            if not response.text:
+                raise ValueError("Empty response from model")
+            data = json.loads(response.text)
+            if data.get("title") and len(data.get("content", "")) > 800:
+                return data
+            raise ValueError("Response missing title or content too short")
+        except Exception as e:
+            last_error = e
+            print(f"Attempt {attempt + 1} failed: {e}")
+    raise RuntimeError(f"Generation failed after 3 attempts: {last_error}")
+
 
 def main():
     api_key = os.environ.get("GEMINI_API_KEY")
     if not api_key:
         raise ValueError("GEMINI_API_KEY secret is missing!")
 
-    client = genai.Client(api_key=api_key)
+    now = datetime.now(timezone.utc)
+    today = now.strftime("%Y-%m-%d")
+    POSTS_DIR.mkdir(exist_ok=True)
 
-    # 1. Load calculators list
-    if not os.path.exists("calculators.json"):
-        raise FileNotFoundError("calculators.json not found!")
-    
-    with open("calculators.json", "r") as f:
+    if list(POSTS_DIR.glob(f"{today}-*.html")) and not os.environ.get("FORCE"):
+        print(f"A post for {today} already exists; skipping.")
+        return
+
+    with open("calculators.json", "r", encoding="utf-8") as f:
         calculators = json.load(f)
 
-    # Pick a random calculator to write about today
-    calc = random.choice(calculators)
-    print(f"Selected calculator for today: {calc['name']}")
+    recent = recent_calculators()
+    pool = [c for c in calculators if c["name"] not in recent] or calculators
+    calc = random.choice(pool)
+    print(f"Selected calculator: {calc['name']}")
 
-    # 2. Prompt Gemini to generate an SEO-friendly blog post
-    prompt = f"""
-    You are an expert financial and utility content writer for JustCalculators.app.
-    Write a helpful, engaging, SEO-optimized blog post explaining the practical real-world importance of the following calculator tool:
+    client = genai.Client(api_key=api_key)
+    post = generate_post(client, calc)
 
-    Tool Name: {calc['name']}
-    Tool URL: {calc['url']}
-    Description: {calc['description']}
+    title = html.escape(post["title"].strip())
+    body = nh3.clean(post["content"], tags=ALLOWED_TAGS, attributes={})
 
-    Requirements:
-    - Return ONLY valid JSON with no markdown formatting blocks around it (i.e. do not use ```json ... ```).
-    - The JSON must have two keys: "title" and "content".
-    - "title": A catchy, SEO-friendly headline for the blog post.
-    - "content": HTML formatted body content (use <h2>, <p>, <ul>, <li>, and strong tags where appropriate). 
-    - Inside the body content, include a styled call-out box linking to the tool using this exact HTML structure:
-      <div class="calculator-callout">
-        <p>Try it yourself: <a href="{calc['url']}" target="_blank">{calc['name']}</a> - {calc['description']}</p>
-      </div>
-    - Provide at least 3-4 insightful paragraphs of valuable context.
-    """
-
-    response = client.models.generate_content(
-        model="gemini-1.5-flash",
-        contents=prompt,
+    callout = (
+        '<div class="calculator-callout"><p>Try it yourself: '
+        f'<a href="{html.escape(calc["url"])}" target="_blank" rel="noopener">'
+        f'{html.escape(calc["name"])}</a> - {html.escape(calc["description"])}'
+        "</p></div>"
     )
+    body = body.replace("</p>", "</p>" + callout, 1) if "</p>" in body else callout + body
 
-    # Clean response text in case markdown blocks were returned
-    raw_text = response.text.strip()
-    if raw_text.startswith("```"):
-        raw_text = raw_text.split("```")[1]
-        if raw_text.startswith("json"):
-            raw_text = raw_text[4:]
-        raw_text = raw_text.strip()
-        if raw_text.endswith("```"):
-            raw_text = raw_text[:-3]
+    text = " ".join(re.sub(r"<[^>]+>", " ", body).split())
+    description = html.escape(text[:155])
 
-    post_data = json.loads(raw_text.strip())
-    
-    date_str = datetime.now().strftime("%Y-%m-%d")
-    slug = post_data["title"].lower().replace(" ", "-").replace("?", "").replace("!", "")
-    slug = "".join(c for c in slug if c.isalnum() or c == "-")[:50]
-    filename = f"posts/{date_str}-{slug}.html"
+    filename = POSTS_DIR / f"{today}-{slugify(post['title'])}.html"
+    timestamp = now.strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Ensure posts directory exists
-    os.makedirs("posts", exist_ok=True)
-
-    # 3. Build the individual post HTML file
     post_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>{post_data['title']} - JustCalculators Blog</title>
+    <title>{title} - JustCalculators Blog</title>
+    <meta name="description" content="{description}">
+    <meta name="calculator" content="{html.escape(calc['name'])}">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
     <header>
         <h1><a href="../index.html">JustCalculators Blog</a></h1>
-        <nav><a href="[https://justcalculators.app](https://justcalculators.app)">Back to JustCalculators</a></nav>
+        <nav><a href="{SITE_URL}">Back to JustCalculators</a></nav>
     </header>
     <main>
         <article>
-            <h2>{post_data['title']}</h2>
-            <div class="post-meta">Published on {date_str}</div>
-            {post_data['content']}
+            <h2>{title}</h2>
+            <div class="post-meta">Published <time datetime="{timestamp}">{today}</time></div>
+            {body}
+            <p class="disclaimer"><em>This article is for general information only and is not financial, legal, or medical advice.</em></p>
         </article>
     </main>
     <footer>
-        <p>&copy; {datetime.now().year} JustCalculators.app. All rights reserved.</p>
+        <p>&copy; {now.year} JustCalculators.app. All rights reserved.</p>
     </footer>
 </body>
 </html>
 """
-
-    with open(filename, "w", encoding="utf-8") as f:
-        f.write(post_html)
+    filename.write_text(post_html, encoding="utf-8")
     print(f"Created post file: {filename}")
+    rebuild_index(now)
 
-    # 4. Rebuild index.html (Homepage listing all posts)
-    rebuild_index()
 
-def rebuild_index():
+def rebuild_index(now):
     posts = []
-    if os.path.exists("posts"):
-        for file in sorted(os.listdir("posts"), reverse=True):
-            if file.endswith(".html"):
-                # Simple extraction of title from file
-                filepath = os.path.join("posts", file)
-                with open(filepath, "r", encoding="utf-8") as f:
-                    content = f.read()
-                    # Extract title
-                    title_start = content.find("<h2>") + 4
-                    title_end = content.find("</h2>")
-                    title = content[title_start:title_end] if title_start != 3 else "Blog Post"
-                    
-                    date_part = file[:10]
-                    posts.append({
-                        "title": title,
-                        "url": f"posts/{file}",
-                        "date": date_part
-                    })
+    for f in sorted(POSTS_DIR.glob("*.html"), reverse=True):
+        content = f.read_text(encoding="utf-8")
+        m = re.search(r"<article>\s*<h2>(.*?)</h2>", content, re.S)
+        posts.append({
+            "title": m.group(1) if m else "Blog Post",  # already escaped
+            "url": f"posts/{f.name}",
+            "date": f.name[:10],
+        })
 
-    posts_html = ""
-    for p in posts:
-        posts_html += f"""
-        <article style="margin-bottom: 1.5rem; padding: 1.5rem; background: #fff; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.05);">
+    posts_html = "".join(
+        f"""
+        <article class="post-card">
             <div class="post-meta">{p['date']}</div>
-            <h3 style="margin-bottom: 0.5rem;"><a href="{p['url']}">{p['title']}</a></h3>
-        </article>
-        """
+            <h3><a href="{p['url']}">{p['title']}</a></h3>
+        </article>"""
+        for p in posts
+    ) or "<p>No posts yet. Check back soon!</p>"
 
     index_html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>JustCalculators Blog - Daily Automated Insights</title>
+    <title>JustCalculators Blog - Practical Guides</title>
+    <meta name="description" content="Practical guides and tips for using everyday calculators.">
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
     <header>
         <h1><a href="index.html">JustCalculators Blog</a></h1>
-        <nav><a href="[https://justcalculators.app](https://justcalculators.app)">Back to JustCalculators</a></nav>
+        <nav><a href="{SITE_URL}">Back to JustCalculators</a></nav>
     </header>
     <main>
-        <div style="margin-bottom: 2rem;">
-            <h2>Latest Posts</h2>
-            <p>Automated insights, guides, and practical math tips powered by our calculator tools.</p>
-        </div>
-        {posts_html if posts_html else "<p>No posts yet. Check back soon!</p>"}
+        <h2>Latest Posts</h2>
+        <p>Guides and practical tips powered by our calculator tools.</p>
+        {posts_html}
     </main>
     <footer>
-        <p>&copy; {datetime.now().year} JustCalculators.app. All rights reserved.</p>
+        <p>&copy; {now.year} JustCalculators.app. All rights reserved.</p>
     </footer>
 </body>
 </html>
 """
-
-    with open("index.html", "w", encoding="utf-8") as f:
-        f.write(index_html)
+    Path("index.html").write_text(index_html, encoding="utf-8")
     print("Successfully updated index.html")
+
 
 if __name__ == "__main__":
     main()
