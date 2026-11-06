@@ -1,0 +1,17 @@
+[
+  {
+    "name": "Percentage Calculator",
+    "url": "https://justcalculators.app/percentage",
+    "description": "Calculates percentages, percentage increases, decreases, and differences easily."
+  },
+  {
+    "name": "Loan Calculator",
+    "url": "https://justcalculators.app/loan",
+    "description": "Estimates monthly loan payments, interest rates, and total amortization schedules."
+  },
+  {
+    "name": "BMI Calculator",
+    "url": "https://justcalculators.app/bmi",
+    "description": "Calculates Body Mass Index to evaluate healthy weight ranges."
+  }
+]
