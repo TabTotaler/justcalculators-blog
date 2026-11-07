@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>JustCalculators Blog</title>
+    <link>https://blog.justcalculators.app/</link>
+    <description>Practical guides and tips for using everyday calculators.</description>
+    <language>en-us</language>
+    <lastBuildDate>Sat, 07 Nov 2026 00:04:46 +0000</lastBuildDate>
+    <atom:link href="https://blog.justcalculators.app/rss.xml" rel="self" type="application/rss+xml"/>
+    <item>
+      <title>Everyday Uses for a Percentage Calculator: Shopping, Budgeting, and Performance Tracking</title>
+      <link>https://blog.justcalculators.app/posts/2026-11-07-everyday-uses-for-a-percentage-calculator-shopping-budgeting.html</link>
+      <guid isPermaLink="true">https://blog.justcalculators.app/posts/2026-11-07-everyday-uses-for-a-percentage-calculator-shopping-budgeting.html</guid>
+      <pubDate>Sat, 07 Nov 2026 00:04:46 +0000</pubDate>
+      <description>Simplifying Everyday Math with a Percentage Calculator Percentages appear constantly in daily life, from grocery store discounts and restaurant bills to tr</description>
+    </item>
+  </channel>
+</rss>
