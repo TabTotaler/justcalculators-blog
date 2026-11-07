@@ -124,7 +124,7 @@ def main():
 </head>
 <body>
     <header>
-        <h1><a href="../index.html">JustCalculators Blog</a></h1>
+        <h1>{LOGO_HTML}</h1>
         <nav><a href="{SITE_URL}">Back to JustCalculators</a></nav>
     </header>
     <main>
