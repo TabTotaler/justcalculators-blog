@@ -4,7 +4,9 @@ import os
 import random
 import re
 from datetime import datetime, timezone
+from email.utils import format_datetime
 from pathlib import Path
+from xml.sax.saxutils import escape as xml_escape
 
 import nh3
 from google import genai
@@ -14,6 +16,11 @@ MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
 print(f"Using model: {MODEL}")
 SITE_URL = "https://justcalculators.app"
 BLOG_URL = "https://blog.justcalculators.app"
+BLOG_TITLE = "JustCalculators Blog"
+BLOG_DESCRIPTION = "Practical guides and tips for using everyday calculators."
+RSS_LINK_TAG = (f'<link rel="alternate" type="application/rss+xml" '
+                f'title="{BLOG_TITLE}" href="/rss.xml">')
+FEED_LIMIT = 20
 POSTS_DIR = Path("posts")
 ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
 
@@ -54,6 +61,8 @@ def refresh_headers():
                 "</head>",
                 f'    <link rel="canonical" href="{BLOG_URL}/posts/{f.name}">\n</head>',
                 1)
+        if "application/rss+xml" not in new:
+            new = new.replace("</head>", f"    {RSS_LINK_TAG}\n</head>", 1)
         if new != text:
             f.write_text(new, encoding="utf-8")
             print(f"Updated header/canonical in {f.name}")
@@ -151,6 +160,7 @@ def main():
     <meta name="description" content="{description}">
     <meta name="calculator" content="{html.escape(calc['name'])}">
     <link rel="canonical" href="{BLOG_URL}/posts/{filename.name}">
+    {RSS_LINK_TAG}
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -175,6 +185,79 @@ def main():
     filename.write_text(post_html, encoding="utf-8")
     print(f"Created post file: {filename}")
     rebuild_index(now)
+
+
+def read_post(f):
+    """Pull title, description and publish time out of a generated post."""
+    text = f.read_text(encoding="utf-8")
+    m = re.search(r"<article>\s*<h2>(.*?)</h2>", text, re.S)
+    title = html.unescape(m.group(1)).strip() if m else f.stem
+    m = re.search(r'<meta name="description" content="([^"]*)"', text)
+    description = html.unescape(m.group(1)) if m else ""
+    published = None
+    m = re.search(r'<time datetime="([^"]+)"', text)
+    if m:
+        try:
+            published = datetime.strptime(
+                m.group(1), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            pass
+    if published is None:
+        published = datetime.strptime(
+            f.name[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    return {
+        "title": title,
+        "description": description,
+        "published": published,
+        "url": f"{BLOG_URL}/posts/{f.name}",
+    }
+
+
+def build_feeds():
+    """Write sitemap.xml, rss.xml and robots.txt (clean URLs only)."""
+    posts = sorted((read_post(f) for f in POSTS_DIR.glob("*.html")),
+                   key=lambda p: p["published"], reverse=True)
+    newest = posts[0]["published"] if posts else datetime.now(timezone.utc)
+
+    # sitemap.xml
+    urls = [f"  <url><loc>{BLOG_URL}/</loc>"
+            f"<lastmod>{newest.strftime('%Y-%m-%d')}</lastmod></url>"]
+    for p in posts:
+        urls.append(f"  <url><loc>{xml_escape(p['url'])}</loc>"
+                    f"<lastmod>{p['published'].strftime('%Y-%m-%d')}</lastmod></url>")
+    Path("sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
+        + "\n".join(urls) + "\n</urlset>\n", encoding="utf-8")
+
+    # rss.xml
+    items = []
+    for p in posts[:FEED_LIMIT]:
+        items.append(
+            "    <item>\n"
+            f"      <title>{xml_escape(p['title'])}</title>\n"
+            f"      <link>{xml_escape(p['url'])}</link>\n"
+            f"      <guid isPermaLink=\"true\">{xml_escape(p['url'])}</guid>\n"
+            f"      <pubDate>{format_datetime(p['published'])}</pubDate>\n"
+            f"      <description>{xml_escape(p['description'])}</description>\n"
+            "    </item>")
+    Path("rss.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">\n'
+        "  <channel>\n"
+        f"    <title>{xml_escape(BLOG_TITLE)}</title>\n"
+        f"    <link>{BLOG_URL}/</link>\n"
+        f"    <description>{xml_escape(BLOG_DESCRIPTION)}</description>\n"
+        "    <language>en-us</language>\n"
+        f"    <lastBuildDate>{format_datetime(newest)}</lastBuildDate>\n"
+        f'    <atom:link href="{BLOG_URL}/rss.xml" rel="self" type="application/rss+xml"/>\n'
+        + "\n".join(items) + "\n  </channel>\n</rss>\n", encoding="utf-8")
+
+    # robots.txt
+    Path("robots.txt").write_text(
+        f"User-agent: *\nAllow: /\n\nSitemap: {BLOG_URL}/sitemap.xml\n",
+        encoding="utf-8")
+    print(f"Wrote sitemap.xml, rss.xml and robots.txt ({len(posts)} posts)")
 
 
 def rebuild_index(now):
@@ -205,6 +288,7 @@ def rebuild_index(now):
     <title>JustCalculators Blog - Practical Guides</title>
     <meta name="description" content="Practical guides and tips for using everyday calculators.">
     <link rel="canonical" href="{BLOG_URL}/">
+    {RSS_LINK_TAG}
     <link rel="stylesheet" href="/style.css">
 </head>
 <body>
@@ -225,6 +309,7 @@ def rebuild_index(now):
 """
     Path("index.html").write_text(index_html, encoding="utf-8")
     print("Successfully updated index.html")
+    build_feeds()
 
 
 if __name__ == "__main__":
