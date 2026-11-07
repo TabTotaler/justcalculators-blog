@@ -13,6 +13,7 @@ from google.genai import types
 MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
 print(f"Using model: {MODEL}")
 SITE_URL = "https://justcalculators.app"
+BLOG_URL = "https://blog.justcalculators.app"
 POSTS_DIR = Path("posts")
 ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
 
@@ -37,14 +38,25 @@ def recent_calculators(n=10):
 
 
 def refresh_headers():
-    """Swap the old plain-text header in existing posts for the logo header."""
-    pattern = re.compile(r'<h1><a href="\.\./index\.html">.*?</a></h1>', re.S)
+    """Make every existing post use the logo header and a canonical URL.
+
+    Replaces whatever <h1> is inside <header> (old plain title, or a literal
+    {LOGO_HTML} placeholder that was pasted by mistake) with the logo, and adds
+    a canonical link if the post doesn't have one yet.
+    """
+    header_pattern = re.compile(r"(<header>\s*)<h1>.*?</h1>", re.S)
     for f in POSTS_DIR.glob("*.html"):
         text = f.read_text(encoding="utf-8")
-        new = pattern.sub(lambda m: f"<h1>{LOGO_HTML}</h1>", text, count=1)
+        new = header_pattern.sub(
+            lambda m: f"{m.group(1)}<h1>{LOGO_HTML}</h1>", text, count=1)
+        if 'rel="canonical"' not in new:
+            new = new.replace(
+                "</head>",
+                f'    <link rel="canonical" href="{BLOG_URL}/posts/{f.name}">\n</head>',
+                1)
         if new != text:
             f.write_text(new, encoding="utf-8")
-            print(f"Updated header in {f.name}")
+            print(f"Updated header/canonical in {f.name}")
 
 
 def generate_post(client, calc):
@@ -138,6 +150,7 @@ def main():
     <title>{title} - JustCalculators Blog</title>
     <meta name="description" content="{description}">
     <meta name="calculator" content="{html.escape(calc['name'])}">
+    <link rel="canonical" href="{BLOG_URL}/posts/{filename.name}">
     <link rel="stylesheet" href="../style.css">
 </head>
 <body>
@@ -191,7 +204,8 @@ def rebuild_index(now):
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>JustCalculators Blog - Practical Guides</title>
     <meta name="description" content="Practical guides and tips for using everyday calculators.">
-    <link rel="stylesheet" href="style.css">
+    <link rel="canonical" href="{BLOG_URL}/">
+    <link rel="stylesheet" href="/style.css">
 </head>
 <body>
     <header>
