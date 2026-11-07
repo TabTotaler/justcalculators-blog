@@ -10,7 +10,8 @@ import nh3
 from google import genai
 from google.genai import types
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+print(f"Using model: {MODEL}")
 SITE_URL = "https://justcalculators.app"
 POSTS_DIR = Path("posts")
 ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
