@@ -1,25 +1,32 @@
 name: Automated Daily Calculator Blog
 
 on:
-  schedule:
-    - cron: '0 8 * * *' # Runs every day at 8:00 AM UTC
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       force:
         description: 'Generate a post even if one already exists today'
         type: boolean
         default: false
+  schedule:
+    - cron: '0 6 * * *'
 
 permissions:
   contents: write
+  pages: write
+  id-token: write
 
 concurrency:
-  group: calculator-blog
+  group: pages
   cancel-in-progress: false
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -33,19 +40,45 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Generate Blog Post
+      - name: Run post generator
+        if: github.event_name != 'push'
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           FORCE: ${{ inputs.force && '1' || '' }}
         run: python generate_post.py
 
-      - name: Commit and push changes
+      - name: Commit generated files
+        if: github.event_name != 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add posts index.html
-          if ! git diff --cached --quiet; then
+          git add -A posts index.html
+          for f in sitemap.xml rss.xml; do
+            if [ -f "$f" ]; then git add "$f"; fi
+          done
+          if ! git diff --staged --quiet; then
             git commit -m "chore: automated daily blog post generation"
-            git pull --rebase origin "${GITHUB_REF_NAME}"
-            git push origin "HEAD:${GITHUB_REF_NAME}"
+            git pull --rebase origin main
+            git push origin HEAD:main
           fi
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Assemble site
+        run: |
+          mkdir _site
+          cp index.html style.css _site/
+          cp -r posts _site/
+          for f in sitemap.xml rss.xml robots.txt; do
+            if [ -f "$f" ]; then cp "$f" _site/; fi
+          done
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
