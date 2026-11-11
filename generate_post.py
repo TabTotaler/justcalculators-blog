@@ -38,7 +38,7 @@ def recent_calculators(n=10):
     names = set()
     for f in sorted(POSTS_DIR.glob("*.html"), reverse=True)[:n]:
         m = re.search(r'<meta name="calculator" content="([^"]*)"',
-                      f.read_text(encoding="utf-8"))
+                    f.read_text(encoding="utf-8"))
         if m:
             names.add(html.unescape(m.group(1)))
     return names
@@ -75,15 +75,19 @@ blog post about the practical, real-world value of this calculator:
 
 Tool: {calc['name']}
 Description: {calc['description']}
+Main App URL: {SITE_URL}
 
 Rules:
 - Return a JSON object with exactly two keys: "title" and "content".
 - "title": a clear, specific headline (no clickbait).
-- "content": HTML using only <h2>, <p>, <ul>, <li>, <strong>. Do not include
-  an <h1>, links, or a call-to-action box.
+- "content": HTML using only <h2>, <p>, <ul>, <li>, <strong>, <em>, <a>. Do not include an <h1> or a call-to-action box.
 - 3-4 substantial sections with practical examples.
-- Do NOT state specific statistics, interest rates, tax figures, or legal
-  claims. Use illustrative round numbers and label them as examples.
+- Do NOT state specific statistics, interest rates, tax figures, or legal claims. Use illustrative round numbers and label them as examples.
+
+Internal Linking Guidelines:
+- Naturally embed 2 to 3 internal links inside the body paragraphs using the HTML <a> tag pointing to {SITE_URL} or relevant calculator category sections.
+- Use varied, contextual anchor text (never use the exact identical anchor text twice). Mix singular and plural variations such as: "calculator", "calculators", "online calculator", "calculation tools", "calculation utility", or "financial tool".
+- Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or test them directly using this <a href="{calc['url']}">online calculator</a>."
 """
     last_error = None
     for attempt in range(3):
@@ -135,7 +139,12 @@ def main():
     post = generate_post(client, calc)
 
     title = html.escape(post["title"].strip())
-    body = nh3.clean(post["content"], tags=ALLOWED_TAGS, attributes={})
+    # Allow href, target, and rel attributes on <a> tags so internal/external links work
+    body = nh3.clean(
+        post["content"], 
+        tags=ALLOWED_TAGS, 
+        attributes={"a": {"href", "target", "rel"}}
+    )
 
     callout = (
         '<div class="calculator-callout"><p>Try it yourself: '
@@ -216,7 +225,7 @@ def read_post(f):
 def build_feeds():
     """Write sitemap.xml, rss.xml and robots.txt (clean URLs only)."""
     posts = sorted((read_post(f) for f in POSTS_DIR.glob("*.html")),
-                   key=lambda p: p["published"], reverse=True)
+                    key=lambda p: p["published"], reverse=True)
     newest = posts[0]["published"] if posts else datetime.now(timezone.utc)
 
     # sitemap.xml
