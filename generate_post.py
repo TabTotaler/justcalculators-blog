@@ -13,8 +13,14 @@ import nh3
 from google import genai
 from google.genai import types
 
-MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
-print(f"Using model: {MODEL}")
+# Primary model with automatic fallback to gemini-1.5-flash if overloaded
+PRIMARY_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+MODELS_TO_TRY = [PRIMARY_MODEL, "gemini-1.5-flash"]
+# Deduplicate in case PRIMARY_MODEL is already gemini-1.5-flash
+MODELS_TO_TRY = list(dict.fromkeys(MODELS_TO_TRY))
+
+print(f"Configured models fallback order: {MODELS_TO_TRY}")
+
 SITE_URL = "https://justcalculators.app"
 BLOG_URL = "https://blog.justcalculators.app"
 BLOG_TITLE = "JustCalculators Blog"
@@ -22,7 +28,7 @@ BLOG_DESCRIPTION = "Practical guides and tips for using everyday calculators."
 RSS_LINK_TAG = (f'<link rel="alternate" type="application/rss+xml" '
                 f'title="{BLOG_TITLE}" href="/rss.xml">')
 FEED_LIMIT = 20
-MAX_ATTEMPTS = 5
+MAX_ATTEMPTS_PER_MODEL = 3
 TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
                      "500 INTERNAL", "504", "DEADLINE_EXCEEDED",
                      "timed out", "Timeout")
@@ -43,7 +49,7 @@ def recent_calculators(n=10):
     names = set()
     for f in sorted(POSTS_DIR.glob("*.html"), reverse=True)[:n]:
         m = re.search(r'<meta name="calculator" content="([^"]*)"',
-                      f.read_text(encoding="utf-8"))
+                    f.read_text(encoding="utf-8"))
         if m:
             names.add(html.unescape(m.group(1)))
     return names
@@ -95,34 +101,44 @@ Internal Linking Guidelines:
 - Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or test them directly using this <a href="{calc['url']}">online calculator</a>."
 """
     last_error = None
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            response = client.models.generate_content(
-                model=MODEL,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json"),
-            )
-            if not response.text:
-                raise ValueError("Empty response from model")
-            data = json.loads(response.text)
-            if data.get("title") and len(data.get("content", "")) > 800:
-                return data
-            raise ValueError("Response missing title or content too short")
-        except Exception as e:
-            last_error = e
-            print(f"Attempt {attempt} failed: {e}")
-            # Retry only temporary problems (overload, rate limit, timeout,
-            # bad/short output). Anything else (404 model, 400, auth) won't
-            # fix itself, so stop immediately.
-            retryable = isinstance(e, ValueError) or any(
-                marker in str(e) for marker in TRANSIENT_MARKERS)
-            if not retryable or attempt == MAX_ATTEMPTS:
-                break
-            wait = min(15 * 2 ** (attempt - 1), 120)  # 15s, 30s, 60s, 120s
-            print(f"Retrying in {wait}s...")
-            time.sleep(wait)
-    raise RuntimeError(f"Generation failed: {last_error}")
+    
+    for model_name in MODELS_TO_TRY:
+        print(f"Attempting generation with model: {model_name}")
+        for attempt in range(1, MAX_ATTEMPTS_PER_MODEL + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json"),
+                )
+                if not response.text:
+                    raise ValueError("Empty response from model")
+                data = json.loads(response.text)
+                if data.get("title") and len(data.get("content", "")) > 800:
+                    print(f"Successfully generated post using {model_name}")
+                    return data
+                raise ValueError("Response missing title or content too short")
+            except Exception as e:
+                last_error = e
+                print(f"[{model_name}] Attempt {attempt} failed: {e}")
+                
+                retryable = isinstance(e, ValueError) or any(
+                    marker in str(e) for marker in TRANSIENT_MARKERS)
+                
+                if not retryable:
+                    # Non-retryable error (e.g. 404 model not found, auth error), skip to next model immediately
+                    break
+                
+                if attempt == MAX_ATTEMPTS_PER_MODEL:
+                    print(f"Exhausted attempts for {model_name}, moving to next model if available...")
+                    break
+                
+                wait = min(10 * (2 ** (attempt - 1)), 60)
+                print(f"Retrying in {wait}s...")
+                time.sleep(wait)
+
+    raise RuntimeError(f"Generation failed across all models. Last error: {last_error}")
 
 
 def restrict_links(body, allowed):
@@ -169,14 +185,11 @@ def main():
     post = generate_post(client, calc)
 
     title = html.escape(post["title"].strip())
-    # nh3 adds rel="noopener noreferrer" to links itself, so "rel" must NOT be
-    # in the allowed attributes (that raises an error).
     body = nh3.clean(
         post["content"],
         tags=ALLOWED_TAGS,
         attributes={"a": {"href", "target"}},
     )
-    # Drop any link the model invented; keep only the two we asked for.
     body = restrict_links(
         body, {SITE_URL.rstrip("/"), calc["url"].rstrip("/")})
 
@@ -259,7 +272,7 @@ def read_post(f):
 def build_feeds():
     """Write sitemap.xml, rss.xml and robots.txt (clean URLs only)."""
     posts = sorted((read_post(f) for f in POSTS_DIR.glob("*.html")),
-                   key=lambda p: p["published"], reverse=True)
+                    key=lambda p: p["published"], reverse=True)
     newest = posts[0]["published"] if posts else datetime.now(timezone.utc)
 
     # sitemap.xml
