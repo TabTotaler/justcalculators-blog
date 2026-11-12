@@ -3,6 +3,7 @@ import json
 import os
 import random
 import re
+import time
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
@@ -21,6 +22,10 @@ BLOG_DESCRIPTION = "Practical guides and tips for using everyday calculators."
 RSS_LINK_TAG = (f'<link rel="alternate" type="application/rss+xml" '
                 f'title="{BLOG_TITLE}" href="/rss.xml">')
 FEED_LIMIT = 20
+MAX_ATTEMPTS = 5
+TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
+                     "500 INTERNAL", "504", "DEADLINE_EXCEEDED",
+                     "timed out", "Timeout")
 POSTS_DIR = Path("posts")
 ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
 
@@ -38,7 +43,7 @@ def recent_calculators(n=10):
     names = set()
     for f in sorted(POSTS_DIR.glob("*.html"), reverse=True)[:n]:
         m = re.search(r'<meta name="calculator" content="([^"]*)"',
-                    f.read_text(encoding="utf-8"))
+                      f.read_text(encoding="utf-8"))
         if m:
             names.add(html.unescape(m.group(1)))
     return names
@@ -85,12 +90,12 @@ Rules:
 - Do NOT state specific statistics, interest rates, tax figures, or legal claims. Use illustrative round numbers and label them as examples.
 
 Internal Linking Guidelines:
-- Naturally embed 2 to 3 internal links inside the body paragraphs using the HTML <a> tag pointing to {SITE_URL} or relevant calculator category sections.
+- Naturally embed 2 to 3 internal links inside the body paragraphs using the HTML <a> tag. Link ONLY to {SITE_URL} or {calc['url']}; never invent any other URL.
 - Use varied, contextual anchor text (never use the exact identical anchor text twice). Mix singular and plural variations such as: "calculator", "calculators", "online calculator", "calculation tools", "calculation utility", or "financial tool".
 - Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or test them directly using this <a href="{calc['url']}">online calculator</a>."
 """
     last_error = None
-    for attempt in range(3):
+    for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
             response = client.models.generate_content(
                 model=MODEL,
@@ -106,10 +111,35 @@ Internal Linking Guidelines:
             raise ValueError("Response missing title or content too short")
         except Exception as e:
             last_error = e
-            print(f"Attempt {attempt + 1} failed: {e}")
-            if "NOT_FOUND" in str(e):
-                break  # a missing model won't fix itself; don't retry
+            print(f"Attempt {attempt} failed: {e}")
+            # Retry only temporary problems (overload, rate limit, timeout,
+            # bad/short output). Anything else (404 model, 400, auth) won't
+            # fix itself, so stop immediately.
+            retryable = isinstance(e, ValueError) or any(
+                marker in str(e) for marker in TRANSIENT_MARKERS)
+            if not retryable or attempt == MAX_ATTEMPTS:
+                break
+            wait = min(15 * 2 ** (attempt - 1), 120)  # 15s, 30s, 60s, 120s
+            print(f"Retrying in {wait}s...")
+            time.sleep(wait)
     raise RuntimeError(f"Generation failed: {last_error}")
+
+
+def restrict_links(body, allowed):
+    """Unwrap any <a> whose href is not on the allowlist (keeps the text)."""
+    def repl(m):
+        href = html.unescape(m.group(1)).rstrip("/")
+        return m.group(0) if href in allowed else m.group(2)
+    return re.sub(r'<a\s[^>]*?href="([^"]*)"[^>]*>(.*?)</a>', repl, body,
+                  flags=re.S)
+
+
+def make_http_options():
+    """Give each Gemini request a 2-minute timeout instead of hanging."""
+    try:
+        return types.HttpOptions(timeout=120_000)  # milliseconds
+    except Exception:
+        return None
 
 
 def main():
@@ -135,16 +165,20 @@ def main():
     calc = random.choice(pool)
     print(f"Selected calculator: {calc['name']}")
 
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key, http_options=make_http_options())
     post = generate_post(client, calc)
 
     title = html.escape(post["title"].strip())
-    # Allow href, target, and rel attributes on <a> tags so internal/external links work
+    # nh3 adds rel="noopener noreferrer" to links itself, so "rel" must NOT be
+    # in the allowed attributes (that raises an error).
     body = nh3.clean(
-        post["content"], 
-        tags=ALLOWED_TAGS, 
-        attributes={"a": {"href", "target", "rel"}}
+        post["content"],
+        tags=ALLOWED_TAGS,
+        attributes={"a": {"href", "target"}},
     )
+    # Drop any link the model invented; keep only the two we asked for.
+    body = restrict_links(
+        body, {SITE_URL.rstrip("/"), calc["url"].rstrip("/")})
 
     callout = (
         '<div class="calculator-callout"><p>Try it yourself: '
@@ -225,7 +259,7 @@ def read_post(f):
 def build_feeds():
     """Write sitemap.xml, rss.xml and robots.txt (clean URLs only)."""
     posts = sorted((read_post(f) for f in POSTS_DIR.glob("*.html")),
-                    key=lambda p: p["published"], reverse=True)
+                   key=lambda p: p["published"], reverse=True)
     newest = posts[0]["published"] if posts else datetime.now(timezone.utc)
 
     # sitemap.xml
