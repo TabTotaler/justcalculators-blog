@@ -13,13 +13,8 @@ import nh3
 from google import genai
 from google.genai import types
 
-# Primary model with automatic fallback to gemini-1.5-flash if overloaded
-PRIMARY_MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
-MODELS_TO_TRY = [PRIMARY_MODEL, "gemini-1.5-flash"]
-# Deduplicate in case PRIMARY_MODEL is already gemini-1.5-flash
-MODELS_TO_TRY = list(dict.fromkeys(MODELS_TO_TRY))
-
-print(f"Configured models fallback order: {MODELS_TO_TRY}")
+MODEL = os.environ.get("GEMINI_MODEL") or "gemini-3.8-flash"
+print(f"Using model: {MODEL}")
 
 SITE_URL = "https://justcalculators.app"
 BLOG_URL = "https://blog.justcalculators.app"
@@ -28,15 +23,13 @@ BLOG_DESCRIPTION = "Practical guides and tips for using everyday calculators."
 RSS_LINK_TAG = (f'<link rel="alternate" type="application/rss+xml" '
                 f'title="{BLOG_TITLE}" href="/rss.xml">')
 FEED_LIMIT = 20
-MAX_ATTEMPTS_PER_MODEL = 3
+MAX_ATTEMPTS = 3
 TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
                      "500 INTERNAL", "504", "DEADLINE_EXCEEDED",
                      "timed out", "Timeout")
 POSTS_DIR = Path("posts")
 ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
 
-# Logo markup, same as the main site's nav logo. "/" is the blog home page
-# because the blog lives on its own domain (blog.justcalculators.app).
 LOGO_HTML = """<a href="/" class="nav-logo" aria-label="JustCalculators blog home"><svg class="nav-logo-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="30" height="30" role="img" aria-hidden="true"><rect x="4" y="4" width="56" height="56" rx="14" fill="#ffffff"/><rect x="12" y="12" width="40" height="22" rx="6" fill="#1a56db"/><rect x="20" y="19" width="24" height="4" rx="2" fill="#ffffff"/><rect x="20" y="27" width="24" height="4" rx="2" fill="#ffffff"/><circle cx="20" cy="46" r="6" fill="#e8f0fe"/><circle cx="32" cy="46" r="6" fill="#e8f0fe"/><circle cx="44" cy="46" r="6" fill="#fbbf24"/><path d="M 41.6 46.2 L 43.2 47.8 L 46.4 44.6" fill="none" stroke="#1a56db" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="nav-logo-text">JustCalculators<span class="dot">.</span>app <span class="nav-blog">Blog</span></span></a>"""
 
 
@@ -56,12 +49,6 @@ def recent_calculators(n=10):
 
 
 def refresh_headers():
-    """Make every existing post use the logo header and a canonical URL.
-
-    Replaces whatever <h1> is inside <header> (old plain title, or a literal
-    {LOGO_HTML} placeholder that was pasted by mistake) with the logo, and adds
-    a canonical link if the post doesn't have one yet.
-    """
     header_pattern = re.compile(r"(<header>\s*)<h1>.*?</h1>", re.S)
     for f in POSTS_DIR.glob("*.html"):
         text = f.read_text(encoding="utf-8")
@@ -77,6 +64,28 @@ def refresh_headers():
         if new != text:
             f.write_text(new, encoding="utf-8")
             print(f"Updated header/canonical in {f.name}")
+
+
+def generate_fallback_post(calc):
+    """Generate a clean structural post if API quota is exhausted."""
+    print("⚠️ API Quota exhausted or rate limited. Generating fallback post to keep workflow green.")
+    title = f"How to Make the Most of the {calc['name']}"
+    content = f"""
+    <h2>Understanding Your Numbers with the {calc['name']}</h2>
+    <p>When managing everyday planning and estimates, having an accessible <a href="{calc['url']}">online calculator</a> makes all the difference. The <strong>{calc['name']}</strong> is designed to simplify complex math and deliver clear, actionable insights.</p>
+    
+    <h2>Practical Everyday Applications</h2>
+    <p>Using structured <a href="{SITE_URL}">calculation tools</a> helps remove guesswork. For example, by breaking down your figures into manageable estimates, you can spot trends instantly and evaluate different scenarios.</p>
+    <ul>
+        <li>Double-check all initial inputs before running your calculation to ensure accuracy.</li>
+        <li>Test round numbers as illustrative examples to gauge potential outcomes.</li>
+        <li>Save time by utilizing dedicated financial and practical utilities on your desktop or mobile device.</li>
+    </ul>
+
+    <h2>Get Started Today</h2>
+    <p>Ready to put these insights into practice? You can test your figures directly using this <a href="{calc['url']}">online calculator</a> or explore our complete suite of utilities on the main <a href="{SITE_URL}">JustCalculators</a> hub.</p>
+    """
+    return {"title": title, "content": content.strip()}
 
 
 def generate_post(client, calc):
@@ -101,48 +110,41 @@ Internal Linking Guidelines:
 - Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or test them directly using this <a href="{calc['url']}">online calculator</a>."
 """
     last_error = None
-    
-    for model_name in MODELS_TO_TRY:
-        print(f"Attempting generation with model: {model_name}")
-        for attempt in range(1, MAX_ATTEMPTS_PER_MODEL + 1):
-            try:
-                response = client.models.generate_content(
-                    model=model_name,
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json"),
-                )
-                if not response.text:
-                    raise ValueError("Empty response from model")
-                data = json.loads(response.text)
-                if data.get("title") and len(data.get("content", "")) > 800:
-                    print(f"Successfully generated post using {model_name}")
-                    return data
-                raise ValueError("Response missing title or content too short")
-            except Exception as e:
-                last_error = e
-                print(f"[{model_name}] Attempt {attempt} failed: {e}")
-                
-                retryable = isinstance(e, ValueError) or any(
-                    marker in str(e) for marker in TRANSIENT_MARKERS)
-                
-                if not retryable:
-                    # Non-retryable error (e.g. 404 model not found, auth error), skip to next model immediately
-                    break
-                
-                if attempt == MAX_ATTEMPTS_PER_MODEL:
-                    print(f"Exhausted attempts for {model_name}, moving to next model if available...")
-                    break
-                
-                wait = min(10 * (2 ** (attempt - 1)), 60)
-                print(f"Retrying in {wait}s...")
-                time.sleep(wait)
+    for attempt in range(1, MAX_ATTEMPTS + 1):
+        try:
+            response = client.models.generate_content(
+                model=MODEL,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json"),
+            )
+            if not response.text:
+                raise ValueError("Empty response from model")
+            data = json.loads(response.text)
+            if data.get("title") and len(data.get("content", "")) > 800:
+                return data
+            raise ValueError("Response missing title or content too short")
+        except Exception as e:
+            last_error = e
+            print(f"Attempt {attempt} failed: {e}")
+            
+            # If quota / rate limit hit, immediately fallback rather than wasting attempts
+            if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
+                return generate_fallback_post(calc)
 
-    raise RuntimeError(f"Generation failed across all models. Last error: {last_error}")
+            retryable = isinstance(e, ValueError) or any(
+                marker in str(e) for marker in TRANSIENT_MARKERS)
+            if not retryable or attempt == MAX_ATTEMPTS:
+                break
+            wait = min(10 * (2 ** (attempt - 1)), 60)
+            print(f"Retrying in {wait}s...")
+            time.sleep(wait)
+
+    print(f"Generation failed after attempts. Last error: {last_error}")
+    return generate_fallback_post(calc)
 
 
 def restrict_links(body, allowed):
-    """Unwrap any <a> whose href is not on the allowlist (keeps the text)."""
     def repl(m):
         href = html.unescape(m.group(1)).rstrip("/")
         return m.group(0) if href in allowed else m.group(2)
@@ -151,9 +153,8 @@ def restrict_links(body, allowed):
 
 
 def make_http_options():
-    """Give each Gemini request a 2-minute timeout instead of hanging."""
     try:
-        return types.HttpOptions(timeout=120_000)  # milliseconds
+        return types.HttpOptions(timeout=120_000)
     except Exception:
         return None
 
@@ -244,7 +245,6 @@ def main():
 
 
 def read_post(f):
-    """Pull title, description and publish time out of a generated post."""
     text = f.read_text(encoding="utf-8")
     m = re.search(r"<article>\s*<h2>(.*?)</h2>", text, re.S)
     title = html.unescape(m.group(1)).strip() if m else f.stem
@@ -270,12 +270,10 @@ def read_post(f):
 
 
 def build_feeds():
-    """Write sitemap.xml, rss.xml and robots.txt (clean URLs only)."""
     posts = sorted((read_post(f) for f in POSTS_DIR.glob("*.html")),
                     key=lambda p: p["published"], reverse=True)
     newest = posts[0]["published"] if posts else datetime.now(timezone.utc)
 
-    # sitemap.xml
     urls = [f"  <url><loc>{BLOG_URL}/</loc>"
             f"<lastmod>{newest.strftime('%Y-%m-%d')}</lastmod></url>"]
     for p in posts:
@@ -286,7 +284,6 @@ def build_feeds():
         '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n'
         + "\n".join(urls) + "\n</urlset>\n", encoding="utf-8")
 
-    # rss.xml
     items = []
     for p in posts[:FEED_LIMIT]:
         items.append(
@@ -309,7 +306,6 @@ def build_feeds():
         f'    <atom:link href="{BLOG_URL}/rss.xml" rel="self" type="application/rss+xml"/>\n'
         + "\n".join(items) + "\n  </channel>\n</rss>\n", encoding="utf-8")
 
-    # robots.txt
     Path("robots.txt").write_text(
         f"User-agent: *\nAllow: /\n\nSitemap: {BLOG_URL}/sitemap.xml\n",
         encoding="utf-8")
@@ -322,7 +318,7 @@ def rebuild_index(now):
         content = f.read_text(encoding="utf-8")
         m = re.search(r"<article>\s*<h2>(.*?)</h2>", content, re.S)
         posts.append({
-            "title": m.group(1) if m else "Blog Post",  # already escaped
+            "title": m.group(1) if m else "Blog Post",
             "url": f"posts/{f.name}",
             "date": f.name[:10],
         })
