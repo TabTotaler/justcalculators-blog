@@ -67,31 +67,38 @@ def refresh_headers():
 
 
 def generate_fallback_post(calc):
-    """Generate a clean structural post if API quota is exhausted."""
-    print("⚠️ API Quota exhausted or rate limited. Generating fallback post to keep workflow green.")
-    title = f"How to Make the Most of the {calc['name']}"
+    """Generate a detailed structural post if API quota is exhausted."""
+    print("⚠️ API Quota exhausted or rate limited. Generating comprehensive fallback post.")
+    title = f"Comprehensive Guide to Using the {calc['name']}"
     content = f"""
     <h2>Understanding Your Numbers with the {calc['name']}</h2>
-    <p>When managing everyday planning and estimates, having an accessible <a href="{calc['url']}">online calculator</a> makes all the difference. The <strong>{calc['name']}</strong> is designed to simplify complex math and deliver clear, actionable insights.</p>
+    <p>When managing everyday planning, projections, and personal estimates, having a reliable and accessible <a href="{calc['url']}">online calculator</a> makes all the difference. The <strong>{calc['name']}</strong> is specifically engineered to remove the friction from complex calculations, delivering clear, actionable insights in seconds.</p>
     
-    <h2>Practical Everyday Applications</h2>
-    <p>Using structured <a href="{SITE_URL}">calculation tools</a> helps remove guesswork. For example, by breaking down your figures into manageable estimates, you can spot trends instantly and evaluate different scenarios.</p>
+    <h2>Practical Everyday Applications and Use Cases</h2>
+    <p>Using structured <a href="{SITE_URL}">calculation tools</a> helps eliminate guesswork from your planning process. For example, by breaking down your core figures into manageable estimates, you can evaluate multiple scenarios and spot trends instantly without manual math errors.</p>
     <ul>
-        <li>Double-check all initial inputs before running your calculation to ensure accuracy.</li>
-        <li>Test round numbers as illustrative examples to gauge potential outcomes.</li>
-        <li>Save time by utilizing dedicated financial and practical utilities on your desktop or mobile device.</li>
+        <li>Double-check all initial inputs and baseline metrics before running your calculation to ensure maximum accuracy.</li>
+        <li>Test various round numbers as illustrative examples to gauge potential best-case and worst-case outcomes.</li>
+        <li>Save valuable time by utilizing dedicated utilities on your desktop, tablet, or mobile device whenever you need quick evaluations.</li>
     </ul>
 
-    <h2>Get Started Today</h2>
-    <p>Ready to put these insights into practice? You can test your figures directly using this <a href="{calc['url']}">online calculator</a> or explore our complete suite of utilities on the main <a href="{SITE_URL}">JustCalculators</a> hub.</p>
+    <h2>Key Factors to Keep in Mind</h2>
+    <p>Every calculation relies heavily on the quality of the inputs provided. When evaluating your results, always consider external variables that might shift your baseline assumptions over time. Taking a methodical approach ensures your long-term planning remains solid and dependable.</p>
+    <ul>
+        <li>Keep your core data updated regularly as circumstances evolve.</li>
+        <li>Compare your calculator outputs against historical trends for better context.</li>
+        <li>Consult professional guidance when dealing with high-stakes financial or legal planning.</li>
+    </ul>
+
+    <h2>Get Started and Explore More Tools</h2>
+    <p>Ready to put these insights into practice? You can test your figures directly using this <a href="{calc['url']}">online calculator</a> or browse through our complete collection of utilities on the main <a href="{SITE_URL}">JustCalculators</a> hub to support all your daily estimation needs.</p>
     """
     return {"title": title, "content": content.strip()}
 
 
 def generate_post(client, calc):
     prompt = f"""
-You are a content writer for JustCalculators.app. Write a helpful, SEO-friendly
-blog post about the practical, real-world value of this calculator:
+You are an expert content writer for JustCalculators.app. Write a thorough, in-depth, and comprehensive SEO-friendly blog post about the practical, real-world value of this calculator:
 
 Tool: {calc['name']}
 Description: {calc['description']}
@@ -99,9 +106,10 @@ Main App URL: {SITE_URL}
 
 Rules:
 - Return a JSON object with exactly two keys: "title" and "content".
-- "title": a clear, specific headline (no clickbait).
+- "title": a clear, specific, engaging headline (no clickbait).
 - "content": HTML using only <h2>, <p>, <ul>, <li>, <strong>, <em>, <a>. Do not include an <h1> or a call-to-action box.
-- 3-4 substantial sections with practical examples.
+- Provide 4 to 5 substantial, detailed sections with rich practical examples, context on why these calculations matter, and best practices.
+- Aim for a comprehensive article length (rich, descriptive paragraphs that thoroughly explain the topic).
 - Do NOT state specific statistics, interest rates, tax figures, or legal claims. Use illustrative round numbers and label them as examples.
 
 Internal Linking Guidelines:
@@ -121,14 +129,15 @@ Internal Linking Guidelines:
             if not response.text:
                 raise ValueError("Empty response from model")
             data = json.loads(response.text)
-            if data.get("title") and len(data.get("content", "")) > 800:
+            
+            # Increased minimum character length from 800 to 1500 for longer, richer posts
+            if data.get("title") and len(data.get("content", "")) > 1500:
                 return data
-            raise ValueError("Response missing title or content too short")
+            raise ValueError("Response missing title or content too short (< 1500 chars)")
         except Exception as e:
             last_error = e
             print(f"Attempt {attempt} failed: {e}")
             
-            # If quota / rate limit hit, immediately fallback rather than wasting attempts
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 return generate_fallback_post(calc)
 
