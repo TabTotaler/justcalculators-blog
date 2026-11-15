@@ -199,7 +199,6 @@ def main():
     calc = random.choice(pool)
     print(f"Selected primary calculator: {calc['name']}")
 
-    # Pick 2 random related calculators from calculators.json for contextual internal linking
     other_calculators = [c for c in calculators if c["name"] != calc["name"]]
     related_calcs = random.sample(other_calculators, min(2, len(other_calculators)))
 
@@ -213,7 +212,6 @@ def main():
         attributes={"a": {"href", "target"}},
     )
 
-    # Allowlist the main site, the primary tool, and the related calculators dynamically
     allowed_urls = {SITE_URL.rstrip("/"), calc["url"].rstrip("/")}
     for rc in related_calcs:
         allowed_urls.add(rc["url"].rstrip("/"))
