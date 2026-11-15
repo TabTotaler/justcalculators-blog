@@ -96,13 +96,21 @@ def generate_fallback_post(calc):
     return {"title": title, "content": content.strip()}
 
 
-def generate_post(client, calc):
+def generate_post(client, calc, related_calcs):
+    related_links_text = "\n".join(
+        f"- {rc['name']}: {rc['url']} ({rc['description']})" for rc in related_calcs
+    )
+    
     prompt = f"""
-You are an expert content writer for JustCalculators.app. Write a thorough, in-depth, and comprehensive SEO-friendly blog post about the practical, real-world value of this calculator:
+You are an expert content writer for JustCalculators.app. Write a thorough, in-depth, and comprehensive SEO-friendly blog post about the practical, real-world value of this primary calculator:
 
-Tool: {calc['name']}
+Primary Tool: {calc['name']}
 Description: {calc['description']}
+Primary URL: {calc['url']}
 Main App URL: {SITE_URL}
+
+Other specific calculator tools available on the site that you can naturally link to:
+{related_links_text}
 
 Rules:
 - Return a JSON object with exactly two keys: "title" and "content".
@@ -113,9 +121,10 @@ Rules:
 - Do NOT state specific statistics, interest rates, tax figures, or legal claims. Use illustrative round numbers and label them as examples.
 
 Internal Linking Guidelines:
-- Naturally embed 2 to 3 internal links inside the body paragraphs using the HTML <a> tag. Link ONLY to {SITE_URL} or {calc['url']}; never invent any other URL.
-- Use varied, contextual anchor text (never use the exact identical anchor text twice). Mix singular and plural variations such as: "calculator", "calculators", "online calculator", "calculation tools", "calculation utility", or "financial tool".
-- Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or test them directly using this <a href="{calc['url']}">online calculator</a>."
+- Naturally embed 2 to 3 internal links inside the body paragraphs using the HTML <a> tag. 
+- You may link to the homepage ({SITE_URL}), the primary tool ({calc['url']}), or any of the specific related calculator URLs listed above. Never invent any other URL.
+- Use varied, contextual anchor text (never use the exact identical anchor text twice). Mix singular and plural variations such as: "calculator", "calculators", "online calculator", specific tool names, or "calculation utilities".
+- Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or evaluate your figures using this <a href="{calc['url']}">online calculator</a>."
 """
     last_error = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -130,7 +139,6 @@ Internal Linking Guidelines:
                 raise ValueError("Empty response from model")
             data = json.loads(response.text)
             
-            # Increased minimum character length from 800 to 1500 for longer, richer posts
             if data.get("title") and len(data.get("content", "")) > 1500:
                 return data
             raise ValueError("Response missing title or content too short (< 1500 chars)")
@@ -189,10 +197,14 @@ def main():
     recent = recent_calculators()
     pool = [c for c in calculators if c["name"] not in recent] or calculators
     calc = random.choice(pool)
-    print(f"Selected calculator: {calc['name']}")
+    print(f"Selected primary calculator: {calc['name']}")
+
+    # Pick 2 random related calculators from calculators.json for contextual internal linking
+    other_calculators = [c for c in calculators if c["name"] != calc["name"]]
+    related_calcs = random.sample(other_calculators, min(2, len(other_calculators)))
 
     client = genai.Client(api_key=api_key, http_options=make_http_options())
-    post = generate_post(client, calc)
+    post = generate_post(client, calc, related_calcs)
 
     title = html.escape(post["title"].strip())
     body = nh3.clean(
@@ -200,8 +212,13 @@ def main():
         tags=ALLOWED_TAGS,
         attributes={"a": {"href", "target"}},
     )
-    body = restrict_links(
-        body, {SITE_URL.rstrip("/"), calc["url"].rstrip("/")})
+
+    # Allowlist the main site, the primary tool, and the related calculators dynamically
+    allowed_urls = {SITE_URL.rstrip("/"), calc["url"].rstrip("/")}
+    for rc in related_calcs:
+        allowed_urls.add(rc["url"].rstrip("/"))
+
+    body = restrict_links(body, allowed_urls)
 
     callout = (
         '<div class="calculator-callout"><p>Try it yourself: '
