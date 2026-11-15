@@ -4,9 +4,12 @@ import os
 import random
 import re
 import time
+import urllib.request
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
+from urllib.parse import urljoin, urlparse
 from xml.sax.saxutils import escape as xml_escape
 
 import nh3
@@ -29,6 +32,21 @@ TRANSIENT_MARKERS = ("503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
                      "timed out", "Timeout")
 POSTS_DIR = Path("posts")
 ALLOWED_TAGS = {"h2", "h3", "p", "ul", "ol", "li", "strong", "em", "a"}
+
+# Where the real calculator pages are listed (source of truth for links).
+SITEMAP_XML_URL = f"{SITE_URL}/sitemap.xml"
+SITEMAP_HTML_URL = f"{SITE_URL}/sitemap.html"
+# Real calculator pages look like https://justcalculators.app/<category>/<slug>.html
+PAGE_RE = re.compile(r"^https://justcalculators\.app/([a-z0-9-]+)/([a-z0-9-]+)\.html$")
+ACRONYMS = {
+    "roi", "irr", "npv", "wacc", "bmi", "bmr", "tdee", "apr", "apy", "cagr",
+    "capm", "dti", "fica", "fifo", "hsa", "ira", "pmi", "rmd", "vat", "eps",
+    "ctr", "cpa", "cac", "gpa", "fba", "pod", "spod", "ups", "usps", "dhl",
+    "fte", "magi", "agi", "dscr", "ear", "roas", "roce", "roic", "rgb", "hex",
+    "bsa", "bac", "pslf", "heloc", "cogs", "ebitda", "ev", "3pl",
+}
+STOPWORDS = {"calculator", "calc", "the", "of", "to", "and", "vs", "for", "a",
+             "an", "in", "with", "rate", "embed", "2026"}
 
 LOGO_HTML = """<a href="/" class="nav-logo" aria-label="JustCalculators blog home"><svg class="nav-logo-icon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="30" height="30" role="img" aria-hidden="true"><rect x="4" y="4" width="56" height="56" rx="14" fill="#ffffff"/><rect x="12" y="12" width="40" height="22" rx="6" fill="#1a56db"/><rect x="20" y="19" width="24" height="4" rx="2" fill="#ffffff"/><rect x="20" y="27" width="24" height="4" rx="2" fill="#ffffff"/><circle cx="20" cy="46" r="6" fill="#e8f0fe"/><circle cx="32" cy="46" r="6" fill="#e8f0fe"/><circle cx="44" cy="46" r="6" fill="#fbbf24"/><path d="M 41.6 46.2 L 43.2 47.8 L 46.4 44.6" fill="none" stroke="#1a56db" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg><span class="nav-logo-text">JustCalculators<span class="dot">.</span>app <span class="nav-blog">Blog</span></span></a>"""
 
@@ -66,6 +84,184 @@ def refresh_headers():
             print(f"Updated header/canonical in {f.name}")
 
 
+# ---------------------------------------------------------------------------
+# Real calculator pages (from the main site's sitemaps)
+# ---------------------------------------------------------------------------
+
+def http_get(url, timeout=20, tries=3):
+    last = None
+    for i in range(tries):
+        try:
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "JustCalculatorsBlogBot/1.0 (+https://blog.justcalculators.app)"})
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return r.read().decode("utf-8", errors="replace")
+        except Exception as e:
+            last = e
+            time.sleep(2 * (i + 1))
+    raise last
+
+
+def name_from_slug(slug):
+    return " ".join(w.upper() if w in ACRONYMS else w.capitalize()
+                    for w in slug.split("-"))
+
+
+def clean_label(text):
+    label = html.unescape(re.sub(r"<[^>]+>", "", text)).strip()
+    label = re.split(r"\s+[—–]\s+", label)[0]      # "CPA Calculator — Cost per ..." -> first part
+    label = re.sub(r"\s+20\d\d$", "", label)        # drop a trailing year
+    return label.strip()
+
+
+def tokens(text):
+    return {w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in STOPWORDS}
+
+
+def norm(text):
+    return re.sub(r"[^a-z0-9]+", "", text.lower())
+
+
+def load_site_index():
+    """Return a list of real calculator pages, or None if the sitemap is unavailable.
+
+    Each entry: url, category, slug, name, priority, tokens.
+    """
+    try:
+        root = ET.fromstring(http_get(SITEMAP_XML_URL))
+    except Exception as e:
+        print(f"WARNING: could not load {SITEMAP_XML_URL}: {e}")
+        return None
+
+    ns = {"s": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+    entries = {}
+    for u in root.findall("s:url", ns):
+        loc = (u.findtext("s:loc", default="", namespaces=ns) or "").strip()
+        m = PAGE_RE.match(loc)
+        if not m or m.group(2).endswith("-embed"):
+            continue  # skips home/about/privacy/etc. and the *-embed.html pages
+        try:
+            priority = float(u.findtext("s:priority", default="0.5", namespaces=ns))
+        except ValueError:
+            priority = 0.5
+        entries[loc] = {"url": loc, "category": m.group(1), "slug": m.group(2),
+                        "name": name_from_slug(m.group(2)), "priority": priority}
+
+    # The HTML sitemap has the proper display names (and a few pages the XML lacks).
+    try:
+        seen = set()
+        page = http_get(SITEMAP_HTML_URL)
+        for href, text in re.findall(r'<a\s[^>]*?href="([^"]+)"[^>]*>(.*?)</a>', page, re.S):
+            url = urljoin(SITEMAP_HTML_URL, html.unescape(href)).split("#")[0]
+            m = PAGE_RE.match(url)
+            if not m or m.group(2).endswith("-embed") or url in seen:
+                continue
+            label = clean_label(text)
+            if not label:
+                continue
+            seen.add(url)
+            if url not in entries:
+                entries[url] = {"url": url, "category": m.group(1), "slug": m.group(2),
+                                "name": label, "priority": 0.6}
+            else:
+                entries[url]["name"] = label
+    except Exception as e:
+        print(f"WARNING: could not load {SITEMAP_HTML_URL} (using names from URLs): {e}")
+
+    if len(entries) < 50:
+        print(f"WARNING: sitemap looked too small ({len(entries)} pages); ignoring it.")
+        return None
+
+    index = sorted(entries.values(), key=lambda e: e["priority"], reverse=True)
+    for e in index:
+        e["tokens"] = tokens(e["name"]) | tokens(e["slug"].replace("-", " "))
+    print(f"Loaded {len(index)} real calculator pages from {SITE_URL}.")
+    return index
+
+
+def find_entry(calc, by_url, by_slug, by_key):
+    """Match one calculators.json entry to a real page (URL, then slug, then name)."""
+    url = (calc.get("url") or "").strip()
+    if url:
+        hit = by_url.get(urljoin(SITE_URL + "/", url).lower().rstrip("/"))
+        if hit:
+            return hit
+    segs = [s for s in urlparse(url).path.split("/") if s]
+    category = segs[-2] if len(segs) >= 2 else None
+    slug = segs[-1].removesuffix(".html") if segs else ""
+
+    cands = []
+    if slug:
+        cands = by_slug.get(slug) or by_slug.get(slug + "-calculator") or []
+    if not cands:
+        key = norm(calc.get("name", ""))
+        for k in (key, key + "calculator", key.removesuffix("calculator")):
+            if k and k in by_key:
+                cands = by_key[k]
+                break
+    if not cands:
+        return None
+    if category:
+        same = [e for e in cands if e["category"] == category]
+        if same:
+            return same[0]
+    return cands[0]  # index is sorted by priority, so this is the most prominent page
+
+
+def resolve_calculators(calculators, index):
+    """Point every calculators.json entry at its real page; drop ones with no page."""
+    by_url = {e["url"].lower().rstrip("/"): e for e in index}
+    by_slug, by_key = {}, {}
+    for e in index:
+        by_slug.setdefault(e["slug"], []).append(e)
+        for key in {norm(e["name"]), norm(e["slug"])}:
+            by_key.setdefault(key, []).append(e)
+
+    resolved, unmatched, seen = [], [], set()
+    for c in calculators:
+        e = find_entry(c, by_url, by_slug, by_key)
+        if not e:
+            unmatched.append(c.get("name") or c.get("url") or "?")
+            continue
+        if e["url"] in seen:
+            continue
+        seen.add(e["url"])
+        resolved.append({
+            "name": e["name"],
+            "url": e["url"],
+            "description": c.get("description")
+                           or f"Free online {e['name']} from JustCalculators.app.",
+            "category": e["category"],
+        })
+    return resolved, unmatched
+
+
+def pick_related(calc, index, n=3):
+    """Choose calculators on the same topic first, then popular ones in the category."""
+    mine = next((e for e in index if e["url"] == calc["url"]), None)
+    base = mine["tokens"] if mine else tokens(calc["name"])
+    category = calc.get("category")
+    scored = []
+    for e in index:
+        if e["url"] == calc["url"]:
+            continue
+        score = 3 * len(base & e["tokens"]) + (2 if e["category"] == category else 0) + e["priority"]
+        scored.append((score, e))
+    scored.sort(key=lambda t: t[0], reverse=True)
+
+    # 1) pages that share a topic word with this calculator (e.g. "loan", "mortgage")
+    same_topic = [e for _, e in scored if base & e["tokens"]][:n * 2]
+    chosen = random.sample(same_topic, min(n, len(same_topic)))
+    # 2) fill any remaining slots with the best-scoring other pages (same category, popular)
+    if len(chosen) < n:
+        urls = {e["url"] for e in chosen}
+        rest = [e for _, e in scored if e["url"] not in urls][:n]
+        chosen += random.sample(rest, min(n - len(chosen), len(rest)))
+    return [{"name": e["name"], "url": e["url"],
+             "description": f"Free online {e['name']}", "category": e["category"]}
+            for e in chosen]
+
+
 def generate_fallback_post(calc):
     """Generate a detailed structural post if API quota is exhausted."""
     print("⚠️ API Quota exhausted or rate limited. Generating comprehensive fallback post.")
@@ -98,9 +294,9 @@ def generate_fallback_post(calc):
 
 def generate_post(client, calc, related_calcs):
     related_links_text = "\n".join(
-        f"- {rc['name']}: {rc['url']} ({rc['description']})" for rc in related_calcs
+        f"- {rc['name']}: {rc['url']}" for rc in related_calcs
     )
-    
+
     prompt = f"""
 You are an expert content writer for JustCalculators.app. Write a thorough, in-depth, and comprehensive SEO-friendly blog post about the practical, real-world value of this primary calculator:
 
@@ -109,7 +305,7 @@ Description: {calc['description']}
 Primary URL: {calc['url']}
 Main App URL: {SITE_URL}
 
-Other specific calculator tools available on the site that you can naturally link to:
+Other real calculator pages on the site that you can naturally link to (these are the ONLY valid calculator URLs):
 {related_links_text}
 
 Rules:
@@ -121,10 +317,11 @@ Rules:
 - Do NOT state specific statistics, interest rates, tax figures, or legal claims. Use illustrative round numbers and label them as examples.
 
 Internal Linking Guidelines:
-- Naturally embed 2 to 3 internal links inside the body paragraphs using the HTML <a> tag. 
-- You may link to the homepage ({SITE_URL}), the primary tool ({calc['url']}), or any of the specific related calculator URLs listed above. Never invent any other URL.
-- Use varied, contextual anchor text (never use the exact identical anchor text twice). Mix singular and plural variations such as: "calculator", "calculators", "online calculator", specific tool names, or "calculation utilities".
-- Example: "...you can explore more options on our <a href="{SITE_URL}">calculators hub</a> or evaluate your figures using this <a href="{calc['url']}">online calculator</a>."
+- Naturally embed 3 to 4 internal links inside the body paragraphs using the HTML <a> tag.
+- Always link to the primary tool ({calc['url']}) once. Link to at least two of the related calculators listed above, only where they are genuinely relevant to the sentence. You may also link once to the homepage ({SITE_URL}).
+- Use ONLY the exact URLs given above. Never invent, shorten, or guess any other URL.
+- Make the anchor text describe the destination: use the calculator's name (for example "{calc['name']}") or a natural variation of it. Never use "click here". Do not use the exact same anchor text twice.
+- Example: "...you can evaluate your figures with our <a href="{calc['url']}">{calc['name']}</a> and compare scenarios using the related tools above."
 """
     last_error = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
@@ -138,14 +335,14 @@ Internal Linking Guidelines:
             if not response.text:
                 raise ValueError("Empty response from model")
             data = json.loads(response.text)
-            
+
             if data.get("title") and len(data.get("content", "")) > 1500:
                 return data
             raise ValueError("Response missing title or content too short (< 1500 chars)")
         except Exception as e:
             last_error = e
             print(f"Attempt {attempt} failed: {e}")
-            
+
             if "429" in str(e) or "RESOURCE_EXHAUSTED" in str(e):
                 return generate_fallback_post(calc)
 
@@ -162,6 +359,7 @@ Internal Linking Guidelines:
 
 
 def restrict_links(body, allowed):
+    """Unwrap any <a> whose href is not a known real page (keeps the text)."""
     def repl(m):
         href = html.unescape(m.group(1)).rstrip("/")
         return m.group(0) if href in allowed else m.group(2)
@@ -194,13 +392,36 @@ def main():
     with open("calculators.json", "r", encoding="utf-8") as f:
         calculators = json.load(f)
 
+    # Make sure every calculator points at a page that really exists.
+    index = load_site_index()
+    if index:
+        resolved, unmatched = resolve_calculators(calculators, index)
+        print(f"Matched {len(resolved)} of {len(calculators)} calculators.json entries "
+              f"to real pages on {SITE_URL}.")
+        if unmatched:
+            shown = ", ".join(unmatched[:25]) + (" ..." if len(unmatched) > 25 else "")
+            print(f"No real page found for (skipped): {shown}")
+        if resolved:
+            calculators = resolved
+        else:
+            print("WARNING: nothing in calculators.json matched; using the sitemap list instead.")
+            calculators = [{"name": e["name"], "url": e["url"],
+                            "description": f"Free online {e['name']} from JustCalculators.app.",
+                            "category": e["category"]} for e in index]
+    else:
+        print("WARNING: sitemap unavailable; using calculators.json URLs as-is.")
+
     recent = recent_calculators()
     pool = [c for c in calculators if c["name"] not in recent] or calculators
     calc = random.choice(pool)
-    print(f"Selected primary calculator: {calc['name']}")
+    print(f"Selected primary calculator: {calc['name']} -> {calc['url']}")
 
-    other_calculators = [c for c in calculators if c["name"] != calc["name"]]
-    related_calcs = random.sample(other_calculators, min(2, len(other_calculators)))
+    if index:
+        related_calcs = pick_related(calc, index)
+    else:
+        others = [c for c in calculators if c["name"] != calc["name"]]
+        related_calcs = random.sample(others, min(3, len(others)))
+    print("Related calculators: " + ", ".join(rc["name"] for rc in related_calcs))
 
     client = genai.Client(api_key=api_key, http_options=make_http_options())
     post = generate_post(client, calc, related_calcs)
@@ -212,9 +433,11 @@ def main():
         attributes={"a": {"href", "target"}},
     )
 
+    # Only links to real pages survive. Anything invented is turned into plain text.
     allowed_urls = {SITE_URL.rstrip("/"), calc["url"].rstrip("/")}
-    for rc in related_calcs:
-        allowed_urls.add(rc["url"].rstrip("/"))
+    allowed_urls.update(rc["url"].rstrip("/") for rc in related_calcs)
+    if index:
+        allowed_urls.update(e["url"].rstrip("/") for e in index)
 
     body = restrict_links(body, allowed_urls)
 
