@@ -1,32 +1,18 @@
-name: Automated Daily Calculator Blog
+name: Generate Daily Blog Post
 
 on:
-  push:
-    branches: [main]
-  workflow_dispatch:
-    inputs:
-      force:
-        description: 'Generate a post even if one already exists today'
-        type: boolean
-        default: false
   schedule:
-    - cron: '0 6 * * *'
+    - cron: '0 8 * * *' # Runs daily at 8:00 UTC
+  workflow_dispatch: # Allows manual runs from GitHub UI
 
 permissions:
   contents: write
   pages: write
   id-token: write
 
-concurrency:
-  group: pages
-  cancel-in-progress: false
-
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -34,51 +20,29 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
-          cache: 'pip'
+          python-version: '3.10'
 
       - name: Install dependencies
-        run: pip install -r requirements.txt
+        run: |
+          pip install google-genai nh3
 
-      - name: Run post generator
-        if: github.event_name != 'push'
+      - name: Run post generator script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          FORCE: ${{ inputs.force && '1' || '' }}
-        run: python generate_post.py
-
-      - name: Commit generated files
-        if: github.event_name != 'push'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A posts index.html
-          for f in sitemap.xml rss.xml; do
-            if [ -f "$f" ]; then git add "$f"; fi
-          done
-          if ! git diff --staged --quiet; then
-            git commit -m "chore: automated daily blog post generation"
-            git pull --rebase origin main
-            git push origin HEAD:main
-          fi
+          python generate_post.py
 
-      - name: Setup Pages
-        uses: actions/configure-pages@v4
-
-      - name: Assemble site
+      - name: Commit and push generated blog files
         run: |
-          mkdir _site
-          cp index.html style.css _site/
-          cp -r posts _site/
-          for f in sitemap.xml rss.xml robots.txt; do
-            if [ -f "$f" ]; then cp "$f" _site/; fi
-          done
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add posts/ index.html sitemap.xml rss.xml robots.txt
+          git diff --quiet && git diff --cached --quiet || (git commit -m "Auto-generate daily blog post [skip ci]" && git push)
 
-      - name: Upload artifact
+      - name: Upload artifact for GitHub Pages
         uses: actions/upload-pages-artifact@v3
         with:
-          path: _site
+          path: "."
 
       - name: Deploy to GitHub Pages
-        id: deployment
         uses: actions/deploy-pages@v4
