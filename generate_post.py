@@ -274,16 +274,94 @@ def pick_related(calc, index, n=3):
             for e in chosen]
 
 
+# Link text that tells the reader nothing. Posts using these are regenerated.
+BANNED_ANCHORS = {
+    "online calculator", "online calculators", "calculation tools", "calculation tool",
+    "calculation utility", "calculation utilities", "calculators hub", "calculator hub",
+    "financial tool", "online tool", "this tool", "this calculator", "the calculator",
+    "calculator", "calculators", "tool", "tools", "click here", "here", "learn more",
+    "read more", "link",
+}
+
+
+def anchor_problems(content):
+    """List weak link text in generated HTML: generic phrases or repeated anchors."""
+    problems, seen = [], set()
+    for inner in re.findall(r"<a\s[^>]*>(.*?)</a>", content, flags=re.S):
+        text = html.unescape(re.sub(r"<[^>]+>", "", inner))
+        anchor = " ".join(text.split()).strip(" .,:;").lower()
+        if not anchor:
+            continue
+        if anchor in BANNED_ANCHORS:
+            problems.append(f'generic anchor "{anchor}"')
+        elif anchor in seen:
+            problems.append(f'repeated anchor "{anchor}"')
+        seen.add(anchor)
+    return problems
+
+
+def load_anchor_keywords():
+    """Optional anchor_keywords.json: {"<calculator URL or name>": ["real search phrase", ...]}.
+
+    Put real Google search phrases (for example from Search Console) here and they
+    are given to the model as preferred link text for that calculator.
+    """
+    path = Path("anchor_keywords.json")
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("expected a JSON object")
+    except Exception as e:
+        print(f"WARNING: could not read anchor_keywords.json: {e}")
+        return {}
+    keywords = {}
+    for key, phrases in data.items():
+        if isinstance(phrases, list):
+            cleaned = [str(p).strip() for p in phrases if str(p).strip()]
+            if cleaned:
+                k = normalize_url(key) if key.startswith("http") else key.strip().lower()
+                keywords[k] = cleaned
+    return keywords
+
+
+def anchor_hint_block(calc, related_calcs, keywords):
+    """Prompt text listing known search phrases for the calculators in this post."""
+    lines = []
+    for c, label in [(calc, "the primary tool")] + [(rc, rc["name"]) for rc in related_calcs]:
+        phrases = keywords.get(normalize_url(c["url"])) or keywords.get(c["name"].strip().lower())
+        if phrases:
+            lines.append(f"- {label}: " + "; ".join(phrases[:8]))
+    if not lines:
+        return ""
+    return ("Real Google search phrases for these calculators (prefer them as anchor text "
+            "whenever they fit the sentence):\n" + "\n".join(lines) + "\n")
+
+
 def generate_fallback_post(calc):
     """Generate a detailed structural post if API quota is exhausted."""
     print("API Quota exhausted or rate limited. Generating comprehensive fallback post.")
     title = f"Comprehensive Guide to Using the {calc['name']}"
+
+    # Vary the link text instead of repeating "online calculator" in every post.
+    name = html.escape(calc["name"])
+    root = re.sub(r"\s*calculator\s*$", "", calc["name"], flags=re.I).strip() or calc["name"]
+    topic = html.escape(root if root.isupper() else root.lower())
+    tool_anchor = random.choice([f"{topic} calculator", f"{topic} calculation tool", name])
+    action_anchor = random.choice([f"Calculate your {topic}", f"Run your {topic} numbers",
+                                   f"Try the {name}"])
+    home_anchor_1 = random.choice(["free everyday calculators", "step-by-step calculators",
+                                   "purpose-built calculators", "easy-to-use calculators"])
+    home_anchor_2 = random.choice(["free calculators for everyday decisions",
+                                   "everyday math and money calculators",
+                                   "other calculators for daily planning"])
     content = f"""
     <h2>Understanding Your Numbers with the {calc['name']}</h2>
-    <p>When managing everyday planning, projections, and personal estimates, having a reliable and accessible <a href="{calc['url']}">online calculator</a> makes all the difference. The <strong>{calc['name']}</strong> is specifically engineered to remove the friction from complex calculations, delivering clear, actionable insights in seconds.</p>
+    <p>When managing everyday planning, projections, and personal estimates, having a reliable and accessible <a href="{calc['url']}">{tool_anchor}</a> makes all the difference. The <strong>{calc['name']}</strong> is specifically engineered to remove the friction from complex calculations, delivering clear, actionable insights in seconds.</p>
     
     <h2>Practical Everyday Applications and Use Cases</h2>
-    <p>Using structured <a href="{SITE_URL}">calculation tools</a> helps eliminate guesswork from your planning process. For example, by breaking down your core figures into manageable estimates, you can evaluate multiple scenarios and spot trends instantly without manual math errors.</p>
+    <p>Using structured <a href="{SITE_URL}">{home_anchor_1}</a> helps eliminate guesswork from your planning process. For example, by breaking down your core figures into manageable estimates, you can evaluate multiple scenarios and spot trends instantly without manual math errors.</p>
     <ul>
         <li>Double-check all initial inputs and baseline metrics before running your calculation to ensure maximum accuracy.</li>
         <li>Test various round numbers as illustrative examples to gauge potential best-case and worst-case outcomes.</li>
@@ -299,12 +377,13 @@ def generate_fallback_post(calc):
     </ul>
 
     <h2>Get Started and Explore More Tools</h2>
-    <p>Ready to put these insights into practice? You can test your figures directly using this <a href="{calc['url']}">online calculator</a> or browse through our complete collection of utilities on the main <a href="{SITE_URL}">JustCalculators</a> hub to support all your daily estimation needs.</p>
+    <p>Ready to put these insights into practice? <a href="{calc['url']}">{action_anchor}</a> now, or browse our full range of <a href="{SITE_URL}">{home_anchor_2}</a> to support all your daily estimation needs.</p>
     """
     return {"title": title, "content": content.strip()}
 
 
-def generate_post(client, calc, related_calcs):
+def generate_post(client, calc, related_calcs, keywords=None):
+    anchor_hints = anchor_hint_block(calc, related_calcs, keywords or {})
     related_links_text = "\n".join(
         f"- {rc['name']}: {rc['url']}" for rc in related_calcs
     )
@@ -332,9 +411,15 @@ Internal Linking Guidelines:
 - Naturally embed 3 to 4 internal links inside the body paragraphs using the HTML <a> tag.
 - Always link to the primary tool ({calc['url']}) once. Link to at least two of the related calculators listed above, only where they are genuinely relevant to the sentence. You may also link once to the homepage ({SITE_URL}).
 - Use ONLY the exact URLs given above. Never invent, shorten, or guess any other URL.
-- Make the anchor text describe the destination: use the calculator's name (for example "{calc['name']}") or a natural variation of it. Never use "click here". Do not use the exact same anchor text twice.
-- Example: "...you can evaluate your figures with our <a href="{calc['url']}">{calc['name']}</a> and compare scenarios using the related tools above."
-"""
+
+Anchor text rules (very important):
+- Write each anchor as a descriptive phrase of 2 to 6 words that tells the reader what they will find on the destination page, and that reads naturally inside the sentence.
+- Base each anchor on how people actually search Google for that specific calculator's topic: its plain name, "how to calculate ..." phrasing, the task people want done, or the result they want to see.
+- For illustration only (do NOT reuse these for other calculators): for a mortgage calculator, good anchors are "mortgage calculator", "calculating a mortgage", "mortgage monthly payment calculations", and "estimate your monthly mortgage payment".
+- Every anchor in the post must be different from the others. Mix the styles above instead of using the same pattern for every link.
+- NEVER use generic anchors such as "online calculator", "calculation tools", "calculation utility", "calculators hub", "financial tool", "this tool", "this calculator", "click here", "here", or "learn more".
+- If you link the homepage, describe the broader topic area (for example "free personal finance calculators") instead of naming the site or using a generic phrase.
+{anchor_hints}"""
     last_error = None
     for attempt in range(1, MAX_ATTEMPTS + 1):
         try:
@@ -349,7 +434,14 @@ Internal Linking Guidelines:
             data = json.loads(response.text)
 
             if data.get("title") and len(data.get("content", "")) > 1500:
-                return data
+                problems = anchor_problems(data["content"])
+                if not problems:
+                    return data
+                if attempt == MAX_ATTEMPTS:
+                    # Better a decent post with imperfect link text than a template post.
+                    print(f"WARNING: publishing with weak link text: {problems}")
+                    return data
+                raise ValueError("Weak link text: " + "; ".join(problems))
             raise ValueError("Response missing title or content too short (< 1500 chars)")
         except Exception as e:
             last_error = e
@@ -432,7 +524,7 @@ def main():
     print("Related calculators: " + ", ".join(rc["name"] for rc in related_calcs))
 
     client = genai.Client(api_key=api_key, http_options=make_http_options())
-    post = generate_post(client, calc, related_calcs)
+    post = generate_post(client, calc, related_calcs, load_anchor_keywords())
 
     title = html.escape(post["title"].strip())
     body = nh3.clean(
